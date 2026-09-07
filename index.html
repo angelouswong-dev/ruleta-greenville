@@ -223,6 +223,11 @@ section.stub::before{
   background:var(--team-color, var(--green)); color:#fff; font-weight:800; font-size:0.85rem;
   border-radius:999px; min-width:26px; height:26px; display:flex; align-items:center; justify-content:center; padding:0 8px;
 }
+.team-full-tag{
+  display:inline-block; font-size:0.68rem; font-weight:800; text-transform:uppercase; letter-spacing:0.03em;
+  color:var(--team-color, var(--green)); background:#ffffff; border-radius:999px; padding:2px 8px; margin-left:6px; vertical-align:middle;
+}
+.team-card.team-full{ opacity:0.85; }
 .roster-list{ list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:6px; }
 .roster-list li{ font-size:0.95rem; font-weight:700; background:rgba(255,255,255,0.75); border-radius:10px; padding:6px 12px; box-shadow:0 1px 3px rgba(13,37,71,0.06); }
 .roster-empty{ font-size:0.9rem; color:var(--muted); font-style:italic; margin:0; }
@@ -287,6 +292,14 @@ const DEFAULT_STATE = {
 let state = JSON.parse(JSON.stringify(DEFAULT_STATE));
 
 const COLOR_BY_ID = { baile: '#14a83d', comida: '#1e4a8a', decoracion: '#2fa9d6' };
+const MAX_PER_TEAM = 2;
+
+function isAreaFull(area){
+  return (area.members ? area.members.length : 0) >= MAX_PER_TEAM;
+}
+function availableAreas(areas){
+  return areas.filter(a => !isAreaFull(a));
+}
 const TINT_BY_ID = { baile: '#e7f8ec', comida: '#e8eef9', decoracion: '#e7f6fb' };
 
 function teamIcon(id, size, color){
@@ -470,14 +483,21 @@ function renderWheelSection(){
       </div>
     </section>`;
   }
+  const open = availableAreas(state.areas);
+  if (open.length === 0 && !resultBanner) {
+    return `<section class="stub wheel-section">
+      <h2 class="section-title">Sorteo completo</h2>
+      <p class="section-desc">Ya se llenaron los ${MAX_PER_TEAM * state.areas.length} lugares (${MAX_PER_TEAM} por equipo). ¡Gracias a todas las que giraron!</p>
+    </section>`;
+  }
   const disabled = isBusy || isSpinning;
   return `<section class="stub wheel-section">
     <h2 class="section-title">Gira la ruleta</h2>
-    <p class="section-desc">El sorteo asigna tu nombre a un equipo al azar, cuidando que los tres queden parejos.</p>
+    <p class="section-desc">El sorteo asigna tu nombre a un equipo al azar, entre los que todavía tienen lugar (máximo ${MAX_PER_TEAM} por equipo).</p>
     ${banner}
     <div class="wheel-shell">
       ${buildPointerSVG()}
-      ${buildWheelSVG(state.areas)}
+      ${buildWheelSVG(open)}
     </div>
     <button class="spin-btn" data-action="spin" ${disabled ? 'disabled' : ''}>${diceIcon(22, '#ffffff')} ¡Que decida la suerte!</button>
   </section>`;
@@ -488,11 +508,16 @@ function renderTeamsSection(){
     const color = COLOR_BY_ID[a.id] || '#14a83d';
     const tint = TINT_BY_ID[a.id] || '#e7f8ec';
     const members = a.members || [];
+    const full = isAreaFull(a);
     const list = members.length
       ? `<ul class="roster-list">${members.map(m => `<li>${escapeHtml(m)}</li>`).join('')}</ul>`
       : `<p class="roster-empty">Aún nadie — ¡gira la ruleta!</p>`;
-    return `<div class="team-card" style="--team-color:${color};--team-tint:${tint}">
-      <div class="team-head"><span class="team-icon">${teamIcon(a.id, 18, '#ffffff')}</span><span class="team-name">${escapeHtml(a.name)}</span><span class="team-count">${members.length}</span></div>
+    return `<div class="team-card${full ? ' team-full' : ''}" style="--team-color:${color};--team-tint:${tint}">
+      <div class="team-head">
+        <span class="team-icon">${teamIcon(a.id, 18, '#ffffff')}</span>
+        <span class="team-name">${escapeHtml(a.name)}${full ? ' <span class="team-full-tag">Completo</span>' : ''}</span>
+        <span class="team-count">${members.length}/${MAX_PER_TEAM}</span>
+      </div>
       ${list}
     </div>`;
   }).join('');
@@ -718,7 +743,7 @@ async function assign(areaId){
   if (!BACKEND_URL) {
     // Demo local: aplica el cambio directamente en memoria/localStorage.
     const area = state.areas.find(a => a.id === areaId);
-    if (!area) { isSpinning = false; render(); return; }
+    if (!area || isAreaFull(area)) { isSpinning = false; render(); return; }
     const newState = cloneState(state);
     const na = newState.areas.find(a => a.id === areaId);
     na.members = [...(na.members || []), name];
@@ -744,6 +769,8 @@ async function assign(areaId){
     resultBanner = null;
     if (result.error === 'already_assigned') {
       showToast('Ya estás en un equipo — no puedes girar dos veces.');
+    } else if (result.error === 'area_full') {
+      showToast('Justo se llenó ese equipo — gira de nuevo.');
     }
     render();
   }
@@ -763,14 +790,16 @@ function spinWheel(){
   if (!name) { flagNameMissing(); return; }
   const existing = findAssignment(name);
   if (existing) { showToast(`Ya estás en el equipo de ${existing.name}`); render(); return; }
-  const segments = computeSegments(state.areas);
+  const open = availableAreas(state.areas);
+  if (open.length === 0) { showToast('El sorteo ya se completó — no quedan lugares.'); render(); return; }
+  const segments = computeSegments(open);
   const idx = pickIndexByWeight(segments);
   const seg = segments[idx];
   const mid = (seg.start + seg.end) / 2;
   const jitter = (Math.random() - 0.5) * (seg.end - seg.start) * 0.5;
   const deg = 360 * 7 - (mid + jitter);
   isSpinning = true;
-  pendingSpinTarget = state.areas[idx].id;
+  pendingSpinTarget = open[idx].id;
   pendingSpinDeg = deg;
   render();
   spinLock = true;
